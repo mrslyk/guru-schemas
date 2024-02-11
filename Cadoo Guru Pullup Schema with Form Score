@@ -1,0 +1,97 @@
+import { Color, Keypoint, MovementAnalyzer, Position } from "guru/stdlib";
+
+export default class PullUpSchema {
+    constructor() {
+        this.personFrames = []; // Stores frames with detected person data
+        this.reps = []; // Tracks the repetitions of the exercise
+        this.formScores = []; // Stores form scores for each repetition
+        this.creditedReps = 0; // Initialize credited reps count
+        this.IDEAL_CHINUP_ANGLE = 45; // Ideal angle for chin-up position
+        this.IDEAL_DEADHANG_ANGLE = 180; // Ideal angle for dead hang position
+    }
+
+    async processFrame(frame) {
+        const people = await frame.findObjects("person");
+        const person = people[0];
+        if (person) {
+            this.personFrames.push(person); // Add person's frame to the array
+        }
+
+        // Count reps based on the distance change between the right wrist and right hip
+        this.reps = MovementAnalyzer.repsByKeypointDistance(
+            this.personFrames,
+            Keypoint.rightWrist,
+            Keypoint.rightHip,
+            { threshold: 0.25, ignoreStartMs: 1500, ignoreEndMs: 1500 }
+        );
+
+        // Calculate angles and form scores for each detected rep
+        this.reps.forEach((rep, index) => {
+            const deadHangAngle = MovementAnalyzer.angleBetweenKeypoints(
+                rep.startFrame, Keypoint.rightShoulder, Keypoint.rightElbow, Keypoint.rightWrist
+            );
+            const chinUpAngle = MovementAnalyzer.angleBetweenKeypoints(
+                rep.middleFrame, Keypoint.rightShoulder, Keypoint.rightElbow, Keypoint.rightWrist
+            );
+
+            // Calculate form score based on updated ideal angles
+            const deadHangScore = deadHangAngle === this.IDEAL_DEADHANG_ANGLE ? 100 : 0;
+            const chinUpScore = chinUpAngle <= this.IDEAL_CHINUP_ANGLE ? 100 : 0;
+            this.formScores[index] = (deadHangScore + chinUpScore) / 2;
+        });
+
+        return this.outputs();
+    }
+
+    // Renders visual elements on each frame for feedback
+    renderFrame(frameCanvas) {
+        if (this.personFrames.length > 0) {
+            const person = this.personFrames.find(
+                frameObject => frameObject.timestamp >= frameCanvas.timestamp
+            ) || this.personFrames[this.personFrames.length - 1];
+
+            if (person) {
+                // Draw the skeleton with blue lines and white keypoints
+                frameCanvas.drawSkeleton(person, new Color(0, 0, 255), new Color(255, 255, 255));
+
+                let repIndex = this.reps.findIndex(
+                    rep => frameCanvas.timestamp >= rep.startFrame.timestamp &&
+                           frameCanvas.timestamp <= rep.endFrame.timestamp
+                );
+
+                if (repIndex !== -1) {
+                    const wristLocation = person.keypoints[Keypoint.rightWrist];
+                    const elbowLocation = person.keypoints[Keypoint.rightElbow];
+                    const shoulderLocation = person.keypoints[Keypoint.rightShoulder];
+
+                    const currentAngle = MovementAnalyzer.angleBetweenKeypoints(
+                        person, Keypoint.rightWrist, Keypoint.rightElbow, Keypoint.rightShoulder
+                    );
+
+                    const angleColor = (currentAngle <= this.IDEAL_CHINUP_ANGLE || currentAngle >= this.IDEAL_DEADHANG_ANGLE) ?
+                                       new Color(0, 255, 0) : new Color(255, 0, 0);
+
+                    const feedbackText = (currentAngle <= this.IDEAL_CHINUP_ANGLE) ? "Great Form" :
+                                         (currentAngle >= this.IDEAL_DEADHANG_ANGLE) ? "Great Form" :
+                                         (frameCanvas.timestamp <= this.reps[repIndex].middleFrame.timestamp ? "Pull Up" : "Lock Out");
+
+                    frameCanvas.drawText(
+                        feedbackText, new Position(0.1, 0.3), angleColor, { fontSize: 18 }
+                    );
+                }
+            }
+        }
+    }
+
+    async outputs() {
+        // Calculate average form score and credited reps
+        const averageFormScore = this.formScores.reduce((a, b) => a + b, 0) / this.reps.length;
+        this.creditedReps = this.reps.length * averageFormScore / 100;
+
+        return {
+            attemptedReps: this.reps.length, // Total number of attempted repetitions
+            averageFormScore: averageFormScore, // Average form score across all reps
+            creditedReps: this.creditedReps // Total number of credited repetitions
+        };
+    }
+}
